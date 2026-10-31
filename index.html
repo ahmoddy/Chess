@@ -100,7 +100,7 @@ details summary{cursor:pointer;font-weight:600;margin-bottom:8px}
  <div class="row" id="o-lv"><label>Computer level<select id="lvl"><option value="1">1 Novice</option><option value="2">2 Beginner</option><option value="3" selected>3 Intermediate</option><option value="4">4 Advanced</option><option value="5">5 Expert</option><option value="6">6 Master</option></select></label></div>
  <div class="row" id="o-nm"><label>Your name<input id="n1" maxlength="20" placeholder="Player 1"></label><label id="l2">Player 2 name<input id="n2" maxlength="20" placeholder="Player 2"></label></div>
  <div class="row" id="o-tc"><label>Time control<select id="tc"><option value="0">Untimed</option><option value="1,0">1 minute</option><option value="3,2">3 min + 2 s</option><option value="5,0">5 minutes</option><option value="10,0">10 minutes</option><option value="15,10">15 min + 10 s</option></select></label></div>
- <div class="row" id="o-on"><label>Room code (leave empty to create one)<input id="rcode" maxlength="12" autocomplete="off" placeholder="e.g. k3x9a"></label><label>Your colour when creating<select id="ocol"><option value="r">Random</option><option value="w">White</option><option value="b">Black</option></select></label><div id="omsg" role="status"></div></div>
+ <div class="row" id="o-on"><label>Room code (leave empty to create one)<input id="rcode" maxlength="12" autocomplete="off" placeholder="e.g. k3x9a"></label><label>Your colour when creating<select id="ocol"><option value="r">Random</option><option value="w">White</option><option value="b">Black</option></select></label><div id="omsg" role="status"></div><small>On the Claude link this uses its built-in rooms. On other hosts it uses a free peer-to-peer connection, which some school or work networks block.</small></div>
  <div class="row" id="o-alt"><label>White turns<select id="alt"><option value="1">Alternate: Player 1, then Player 2</option><option value="0">Free: either player can move</option></select></label></div>
  <button id="go">Start game</button> <button id="gm2">Saved games, import, stats</button>
 </div></div>
@@ -393,8 +393,11 @@ const emit=d=>{try{return onl.room&&onl.room.emit('chess',d).catch(()=>{})}catch
 const mypeer=()=>{const p=onl.room&&onl.room.peers().find(x=>x.sameTab);return p&&p.peer};
 const cn=c=>c==='w'?'White':'Black';
 function onlLine(){const c=onl.code.toUpperCase();if(!onl.conn)return'Disconnected. Trying to reconnect…';
+ const ids=onl.room?onl.room.peers().map(p=>p.peer):[];
  if(onl.host&&!onl.seat)return'Room '+c+' · waiting for a friend. Share this code.';
+ if(onl.host&&!ids.includes(onl.seat))return'Room '+c+' · your friend disconnected. Waiting for them to rejoin.';
  if(!onl.host&&!onl.hostPeer)return'Room '+c+' · joining…';
+ if(!onl.host&&!ids.includes(onl.hostPeer))return'Room '+c+' · lost the connection to the host.';
  return'Room '+c+' · connected · '+(onl.me==='s'?'watching':'you are '+cn(onl.me))}
 function replay(str){const L=str.split(' ').filter(Boolean),st=[STDST()],sn=[],lm=[null];
  for(const e of L){const s=st[st.length-1],m=legal(s).find(x=>enc(x)===e);if(!m)return false;sn.push(san(s,m));st.push(app(s,m));lm.push(m)}
@@ -427,12 +430,33 @@ function onMsg(g){if(g.sameTab)return;const d=g.data;if(!d||typeof d!=='object')
  else if(d.t==='rq'){note='Rematch requested.';draw()}
  else if(d.t==='new'){onlNew(onl.me==='s'?'s':d.hc==='w'?'b':'w')}}
 function onlSync(){if(onl.host&&onl.seat)emit({t:'sync',mv:mvs(),end:onl.end})}
+function loadScript(u){return new Promise((ok,no)=>{if(window.Peer)return ok();const s=document.createElement('script');s.src=u;s.onload=ok;s.onerror=()=>no(Error('Could not load the connection library. Check your internet or your network settings.'));document.head.append(s)})}
+async function peerRoom(code,host){
+ await loadScript('https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js');
+ const hs=[],cs=[],pcs=[],conns=new Map(),hostId='chess-arena-'+code;let peer,me='',dead=false;
+ const fire=m=>hs.forEach(f=>{try{f(m)}catch(e){}}),chg=()=>pcs.forEach(f=>{try{f()}catch(e){}});
+ const rm={code,emit:async(t,d)=>{for(const c of conns.values())if(c.open)c.send(d)},on:(t,f)=>{hs.push(f);return()=>{}},
+  peers:()=>[{peer:me,sameTab:true}].concat([...conns.keys()].map(p=>({peer:p,sameTab:false}))),
+  onConnection:f=>{cs.push(f);return()=>{}},onPeers:f=>{pcs.push(f);return()=>{}},
+  leave:async()=>{dead=true;try{peer.destroy()}catch(e){}}};
+ const wire=c=>{conns.set(c.peer,c);c.on('data',d=>fire({data:d,peer:c.peer,sameTab:false}));c.on('close',()=>{conns.delete(c.peer);chg()});c.on('error',()=>{});chg()};
+ try{await new Promise((ok,no)=>{
+  const t=setTimeout(()=>no(Error('Could not reach the connection service. Your network may block it.')),12000);
+  if(host){peer=new Peer(hostId);peer.on('open',id=>{me=id;clearTimeout(t);ok()});peer.on('connection',c=>c.on('open',()=>wire(c)));
+   peer.on('error',e=>{clearTimeout(t);no(Error(e.type==='unavailable-id'?'That room code is already in use.':'Connection problem: '+e.type))})}
+  else{peer=new Peer();peer.on('open',id=>{me=id;const c=peer.connect(hostId,{reliable:true});c.on('open',()=>{clearTimeout(t);wire(c);ok()})});
+   peer.on('error',e=>{clearTimeout(t);no(Error(e.type==='peer-unavailable'?'No room with that code was found. Ask your friend to create it first.':'Connection problem: '+e.type))})}})}
+ catch(e){try{peer.destroy()}catch(_){}throw e}
+ peer.on('open',()=>cs.forEach(f=>f(true)));peer.on('disconnected',()=>{cs.forEach(f=>f(false));if(!dead)try{peer.reconnect()}catch(e){}});
+ peer.on('error',e=>{if(e.type==='network'||e.type==='server-error')cs.forEach(f=>f(false))});
+ return rm}
 async function onlStart(code,col){const om=t=>{$('omsg').textContent=t};
  let R=null;try{R=window.claude&&await window.claude.use('room')}catch(e){}
- if(!R)return om('Online play needs the published link (not a downloaded copy), and the page owner has to share it with you as a contributor or editor.');
- const host=!code;code=code||Array.from({length:5},()=>CHS[Math.random()*CHS.length|0]).join('');
+ const host=!code,mk=()=>Array.from({length:5},()=>CHS[Math.random()*CHS.length|0]).join('');code=code||mk();
  if(!/^[a-z0-9]{3,12}$/.test(code))return om('That room code does not look right.');
- let rm;try{rm=await R.join('chess-'+code)}catch(e){return om('Could not open that room: '+((e&&e.message)||'try again'))}
+ om('Connecting…');let rm;
+ if(R){try{rm=await R.join('chess-'+code)}catch(e){return om('Could not open that room: '+((e&&e.message)||'try again'))}}
+ else{for(let i=0;i<3;i++){try{rm=await peerRoom(code,host);break}catch(e){if(host&&/in use/.test(e.message)&&i<2){code=mk();continue}return om(e.message)}}}
  onl.room=rm;onl.host=host;onl.code=code;onl.seat=null;onl.hostPeer=null;onl.conn=true;onl.on=host;
  CFG={mode:'online',side:'w',lvl:3,alt:true};$('menu').hidden=true;$('game').hidden=false;
  onlNew(host?(col==='r'?(Math.random()<.5?'w':'b'):col):'w');
